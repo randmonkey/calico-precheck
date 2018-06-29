@@ -9,12 +9,14 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
 type HostInfo struct {
 	hostName         string
 	hostIP           string
+	hostSSHPort      uint16
 	hostMAC          string
 	hostNetInterface string
 	hostUsername     string
@@ -55,15 +57,21 @@ func parseHostFile(hostFilePath string) (map[string]*HostInfo, error) {
 			continue
 		}
 		parts := strings.Split(line, " ")
-		if len(parts) < 5 {
+		if len(parts) < 6 {
 			continue
+		}
+		sshPort, parseErr := strconv.ParseUint(parts[3], 10, 16)
+		if parseErr != nil {
+			fmt.Printf("parse ssh port for %s error: %v", parts[3], err)
+			sshPort = 22
 		}
 		hostInfo := &HostInfo{
 			hostName:         parts[0],
-			hostIP:           parts[1],
-			hostMAC:          parts[2],
-			hostNetInterface: parts[3],
-			hostUsername:     parts[4],
+			hostUsername:     parts[1],
+			hostIP:           parts[2],
+			hostSSHPort:      uint16(sshPort),
+			hostMAC:          parts[4],
+			hostNetInterface: parts[5],
 		}
 		hosts[hostInfo.hostName] = hostInfo
 	}
@@ -111,11 +119,12 @@ func checkConnectivity(hostInfo, otherHostInfo *HostInfo) (bool, error) {
 	}
 	allOK := true
 	// check L3 connectivity by ping
-	_, _, err := execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, 22, []string{
-		"ping",
-		"-c3",
-		otherHostInfo.hostIP,
-	})
+	_, _, err := execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
+		[]string{
+			"ping",
+			"-c3",
+			otherHostInfo.hostIP,
+		})
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), ping test failed\n",
@@ -124,14 +133,15 @@ func checkConnectivity(hostInfo, otherHostInfo *HostInfo) (bool, error) {
 
 	// check TCP ports for BGP, etcd, and kubernetes API server
 	// check BGP...
-	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, 22, []string{
-		"sudo",
-		"/tmp/tcp-send",
-		fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
-		fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
-		fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
-		fmt.Sprintf("-dst-port=%d", 179),
-	})
+	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
+		[]string{
+			"sudo",
+			"/tmp/tcp-send",
+			fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
+			fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
+			fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
+			fmt.Sprintf("-dst-port=%d", 179),
+		})
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), tcp port %d for BGP not OK\n",
@@ -139,14 +149,15 @@ func checkConnectivity(hostInfo, otherHostInfo *HostInfo) (bool, error) {
 	}
 
 	// check etcd port
-	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, 22, []string{
-		"sudo",
-		"/tmp/tcp-send",
-		fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
-		fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
-		fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
-		fmt.Sprintf("-dst-port=%d", etcdPort),
-	})
+	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
+		[]string{
+			"sudo",
+			"/tmp/tcp-send",
+			fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
+			fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
+			fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
+			fmt.Sprintf("-dst-port=%d", etcdPort),
+		})
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), tcp port %d for etcd not OK\n",
@@ -154,14 +165,15 @@ func checkConnectivity(hostInfo, otherHostInfo *HostInfo) (bool, error) {
 	}
 
 	// check kube-api port
-	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, 22, []string{
-		"sudo",
-		"/tmp/tcp-send",
-		fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
-		fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
-		fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
-		fmt.Sprintf("-dst-port=%d", kubeapiPort),
-	})
+	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
+		[]string{
+			"sudo",
+			"/tmp/tcp-send",
+			fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
+			fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
+			fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
+			fmt.Sprintf("-dst-port=%d", kubeapiPort),
+		})
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), tcp port %d for kubernetes APIserver not OK\n",
@@ -170,7 +182,7 @@ func checkConnectivity(hostInfo, otherHostInfo *HostInfo) (bool, error) {
 
 	// check IPIP connectivity by sending IPIP packet
 	_, _, err = execCommandOnHost(
-		hostInfo.hostUsername, hostInfo.hostIP, 22,
+		hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
 		[]string{
 			"sudo",
 			"/tmp/ipip-send",

@@ -1,0 +1,4 @@
+# format:
+# <host> <username> <IP> <ssh port> <mac> <dev> 
+host1 vagrant 192.168.233.11 22 08:00:27:65:54:5c enp0s8 
+host2 vagrant 192.168.233.12 22 08:00:27:de:76:a9 enp0s8 
