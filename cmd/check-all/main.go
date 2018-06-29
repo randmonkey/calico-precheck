@@ -96,6 +96,7 @@ func main() {
 		log.Fatalf("failed to parse host file %s, error %v", hostFilePath, err)
 	}
 	for host, hostInfo := range hostInfoMap {
+		fmt.Printf("==== check host %s ====\n", host)
 		for otherHost, otherHostInfo := range hostInfoMap {
 			if host != otherHost {
 				fmt.Printf("=== check connectivity from %s to %s ===\n", host, otherHost)
@@ -108,9 +109,41 @@ func main() {
 				fmt.Printf("===============================================\n")
 			}
 		}
+		passed := checkSystemVars(hostInfo)
+		if passed {
+			fmt.Printf("system settings on %s OK\n", host)
+		} else {
+			fmt.Printf("system settings on %s not OK\n", host)
+		}
+		fmt.Printf("====== check host %s done ======\n", host)
 
 	}
 
+}
+
+func checkSystemVars(hostInfo *HostInfo) bool {
+	if hostInfo == nil {
+		return false
+	}
+	stdout, _, err := execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
+		[]string{
+			"sudo",
+			"sysctl",
+			"net.ipv4.ip_forward",
+		})
+	if err != nil {
+		fmt.Printf("failed to check system configuration net.ipv4.ip_forward on %s(%s)\n",
+			hostInfo.hostName, hostInfo.hostIP)
+		return false
+	}
+	if strings.Contains(stdout, "= 1") {
+		return true
+	} else {
+		fmt.Printf("net.ipv4.ip_forward is not opened on %s(%s)\n",
+			hostInfo.hostName, hostInfo.hostIP)
+		return false
+	}
+	return false
 }
 
 func checkConnectivity(hostInfo, otherHostInfo *HostInfo) (bool, error) {

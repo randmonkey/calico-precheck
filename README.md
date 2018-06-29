@@ -2,6 +2,7 @@
 
 部署calico之前检查网络环境是否符合要求。
 
+编译二进制需要libpcap-dev库，Ubuntu安装：`sudo apt-get install libpcap-dev`
 要求：有一台机器（跳板机）可以免密码ssh登录其他所有机器，并在其他机器上拥有免密码sudo权限。
 
 用法：
