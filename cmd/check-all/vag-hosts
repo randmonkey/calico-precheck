@@ -1,0 +1,4 @@
+# format:
+# <host> <IP> <mac> <dev> <username>
+host1 192.168.233.11 08:00:27:65:54:5c enp0s8 vagrant
+host2 192.168.233.12 08:00:27:de:76:a9 enp0s8 vagrant
