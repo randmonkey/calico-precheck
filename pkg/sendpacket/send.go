@@ -77,11 +77,10 @@ func SendIPIPPacket(device string, dstIP string, dstPort uint16, dstMAC string) 
 	if err := handle.WritePacketData(buffer.Bytes()); err != nil {
 		return err
 	}
-	data, _, err := handle.ReadPacketData()
+	_, _, err = handle.ReadPacketData()
 	if err != nil {
 		return err
 	}
-	printRawHex(data)
 	return nil
 
 }
@@ -138,11 +137,10 @@ func SendTCPPacket(device string, dstIP string, dstPort uint16, dstMAC string) e
 	if err := handle.WritePacketData(buffer.Bytes()); err != nil {
 		return err
 	}
-	data, _, err := handle.ReadPacketData()
+	_, _, err = handle.ReadPacketData()
 	if err != nil {
 		return err
 	}
-	printRawHex(data)
 	return nil
 
 }

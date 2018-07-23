@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/golang/glog"
 )
 
 type HostInfo struct {
@@ -22,7 +24,8 @@ type HostInfo struct {
 	hostUsername     string
 }
 
-func execCommandOnHost(username string, host string, port uint16, command []string) (
+func execCommandOnHost(username string, host string, port uint16, command []string,
+	errCh chan error) (
 	stdOut string, stdErr string, err error) {
 	sshCommand := []string{
 		username + "@" + host,
@@ -40,6 +43,8 @@ func execCommandOnHost(username string, host string, port uint16, command []stri
 	err = cmd.Run()
 	stdoutBytes, _ := ioutil.ReadAll(stdoutBuf)
 	stderrBytes, _ := ioutil.ReadAll(stderrBuf)
+	errCh <- err
+	close(errCh)
 	return string(stdoutBytes), string(stderrBytes), err
 }
 
@@ -81,6 +86,7 @@ func parseHostFile(hostFilePath string) (map[string]*HostInfo, error) {
 
 var (
 	hostFilePath string
+	bgpPort      = 179
 	etcdPort     int
 	kubeapiPort  int
 )
@@ -93,29 +99,37 @@ func main() {
 	flag.Parse()
 	hostInfoMap, err := parseHostFile(hostFilePath)
 	if err != nil {
-		log.Fatalf("failed to parse host file %s, error %v", hostFilePath, err)
+		glog.Fatalf("failed to parse host file %s, error %v", hostFilePath, err)
 	}
 	for host, hostInfo := range hostInfoMap {
 		fmt.Printf("==== check host %s ====\n", host)
+		passed := true
 		for otherHost, otherHostInfo := range hostInfoMap {
 			if host != otherHost {
 				fmt.Printf("=== check connectivity from %s to %s ===\n", host, otherHost)
-				passed, _ := checkConnectivity(hostInfo, otherHostInfo)
-				if passed {
-					fmt.Printf("%s to %s: OK\n", host, otherHost)
+				connectivityOK, _ := checkConnectivity(hostInfo, otherHostInfo)
+				if connectivityOK {
+					fmt.Printf("connectivity from %s to %s: OK\n", host, otherHost)
 				} else {
-					fmt.Printf("%s to %s: failed, see above to get details", host, otherHost)
+					fmt.Printf(
+						"connectivity from %s to %s: failed, see above to get details\n",
+						host, otherHost)
 				}
-				fmt.Printf("===============================================\n")
+				passed = passed && connectivityOK
 			}
 		}
-		passed := checkSystemVars(hostInfo)
-		if passed {
+		systemVarOK := checkSystemVars(hostInfo)
+		if systemVarOK {
 			fmt.Printf("system settings on %s OK\n", host)
 		} else {
 			fmt.Printf("system settings on %s not OK\n", host)
 		}
-		fmt.Printf("====== check host %s done ======\n", host)
+		passed = passed && systemVarOK
+		if passed {
+			fmt.Printf("====== host %s OK ======\n", host)
+		} else {
+			fmt.Printf("====== host %s not OK, see above for details\n", host)
+		}
 
 	}
 
@@ -130,7 +144,8 @@ func checkSystemVars(hostInfo *HostInfo) bool {
 			"sudo",
 			"sysctl",
 			"net.ipv4.ip_forward",
-		})
+		},
+		make(chan error, 1))
 	if err != nil {
 		fmt.Printf("failed to check system configuration net.ipv4.ip_forward on %s(%s)\n",
 			hostInfo.hostName, hostInfo.hostIP)
@@ -152,82 +167,134 @@ func checkConnectivity(hostInfo, otherHostInfo *HostInfo) (bool, error) {
 	}
 	allOK := true
 	// check L3 connectivity by ping
+	glog.V(1).Infof("cheking IP connectivity from %s to %s...",
+		hostInfo.hostName, otherHostInfo.hostName)
 	_, _, err := execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
 		[]string{
 			"ping",
 			"-c3",
 			otherHostInfo.hostIP,
-		})
+		}, make(chan error, 1))
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), ping test failed\n",
 			hostInfo.hostName, hostInfo.hostIP, otherHostInfo.hostName, otherHostInfo.hostIP)
 	}
-
+	glog.V(1).Infof("checking TCP ports from %s to %s...",
+		hostInfo.hostName, otherHostInfo.hostName)
 	// check TCP ports for BGP, etcd, and kubernetes API server
 	// check BGP...
-	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
-		[]string{
-			"sudo",
-			"/tmp/tcp-send",
-			fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
-			fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
-			fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
-			fmt.Sprintf("-dst-port=%d", 179),
-		})
+	err = checkTCPPort(hostInfo, otherHostInfo, uint16(bgpPort))
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), tcp port %d for BGP not OK\n",
-			hostInfo.hostName, hostInfo.hostIP, otherHostInfo.hostName, otherHostInfo.hostIP, 179)
+			hostInfo.hostName, hostInfo.hostIP,
+			otherHostInfo.hostName, otherHostInfo.hostIP, bgpPort)
 	}
 
 	// check etcd port
-	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
-		[]string{
-			"sudo",
-			"/tmp/tcp-send",
-			fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
-			fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
-			fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
-			fmt.Sprintf("-dst-port=%d", etcdPort),
-		})
+	err = checkTCPPort(hostInfo, otherHostInfo, uint16(etcdPort))
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), tcp port %d for etcd not OK\n",
-			hostInfo.hostName, hostInfo.hostIP, otherHostInfo.hostName, otherHostInfo.hostIP, etcdPort)
+			hostInfo.hostName, hostInfo.hostIP,
+			otherHostInfo.hostName, otherHostInfo.hostIP, etcdPort)
 	}
 
 	// check kube-api port
-	_, _, err = execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
-		[]string{
-			"sudo",
-			"/tmp/tcp-send",
-			fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
-			fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
-			fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
-			fmt.Sprintf("-dst-port=%d", kubeapiPort),
-		})
+	err = checkTCPPort(hostInfo, otherHostInfo, uint16(kubeapiPort))
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), tcp port %d for kubernetes APIserver not OK\n",
-			hostInfo.hostName, hostInfo.hostIP, otherHostInfo.hostName, otherHostInfo.hostIP, kubeapiPort)
+			hostInfo.hostName, hostInfo.hostIP,
+			otherHostInfo.hostName, otherHostInfo.hostIP, kubeapiPort)
 	}
 
 	// check IPIP connectivity by sending IPIP packet
-	_, _, err = execCommandOnHost(
-		hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
-		[]string{
-			"sudo",
-			"/tmp/ipip-send",
-			fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
-			fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
-			fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
-		},
-	)
+	glog.V(1).Infof("checking IPIP connectivity from %s to %s...",
+		hostInfo.hostName, otherHostInfo.hostName)
+	err = checkIPIP(hostInfo, otherHostInfo)
 	if err != nil {
 		allOK = false
 		fmt.Printf("%s(%s) To %s(%s), IPIP check failed\n",
 			hostInfo.hostName, hostInfo.hostIP, otherHostInfo.hostName, otherHostInfo.hostIP)
 	}
 	return allOK, nil
+}
+
+func checkTCPPort(hostInfo, otherHostInfo *HostInfo, targetPort uint16) error {
+	sendErrChan := make(chan error, 1)
+	captureErrChan := make(chan error, 1)
+	var err error
+	go func() {
+		stdout, stderr, _ := execCommandOnHost(
+			otherHostInfo.hostUsername, otherHostInfo.hostIP, otherHostInfo.hostSSHPort, []string{
+				"sudo",
+				"/tmp/capture-packet",
+				"-proto=tcp",
+				fmt.Sprintf("-dev=%s", otherHostInfo.hostNetInterface),
+				fmt.Sprintf("-src-ip=%s", hostInfo.hostIP),
+				fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
+				fmt.Sprintf("-dst-port=%d", targetPort),
+				"-timeout=5s",
+			}, captureErrChan)
+		glog.V(2).Infof("stdout of capturing packets: %s\n", stdout)
+		glog.V(2).Infof("stderr of capturing packets: %s\n", stderr)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	go func() {
+		stdout, stderr, _ := execCommandOnHost(hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
+			[]string{
+				"sudo",
+				"/tmp/tcp-send",
+				fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
+				fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
+				fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
+				fmt.Sprintf("-dst-port=%d", targetPort),
+			}, sendErrChan)
+		glog.V(2).Infof("stdout of sending packets: %s\n", stdout)
+		glog.V(2).Infof("stderr of sending packets: %s\n", stderr)
+
+	}()
+	err = <-captureErrChan
+	return err
+}
+
+func checkIPIP(hostInfo, otherHostInfo *HostInfo) error {
+	sendErrChan := make(chan error, 1)
+	captureErrChan := make(chan error, 1)
+	var err error
+	go func() {
+		stdout, stderr, _ := execCommandOnHost(
+			otherHostInfo.hostUsername, otherHostInfo.hostIP, otherHostInfo.hostSSHPort, []string{
+				"sudo",
+				"/tmp/capture-packet",
+				"-proto=ipip",
+				fmt.Sprintf("-dev=%s", otherHostInfo.hostNetInterface),
+				fmt.Sprintf("-src-ip=%s", hostInfo.hostIP),
+				fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
+				fmt.Sprintf("-src-ip-inner=%s", hostInfo.hostIP),
+				fmt.Sprintf("-dst-ip-inner=%s", otherHostInfo.hostIP),
+				"-timeout=5s",
+			}, captureErrChan)
+		glog.V(2).Infof("stdout of capturing packets: %s\n", stdout)
+		glog.V(2).Infof("stderr of capturing packets: %s\n", stderr)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	go func() {
+		stdout, stderr, _ := execCommandOnHost(
+			hostInfo.hostUsername, hostInfo.hostIP, hostInfo.hostSSHPort,
+			[]string{
+				"sudo",
+				"/tmp/ipip-send",
+				fmt.Sprintf("-dst-ip=%s", otherHostInfo.hostIP),
+				fmt.Sprintf("-dst-mac=%s", otherHostInfo.hostMAC),
+				fmt.Sprintf("-dev=%s", hostInfo.hostNetInterface),
+			}, sendErrChan)
+		glog.V(2).Infof("stdout of sending packets: %s\n", stdout)
+		glog.V(2).Infof("stderr of sending packets: %s\n", stderr)
+	}()
+
+	err = <-captureErrChan
+	return err
 }
